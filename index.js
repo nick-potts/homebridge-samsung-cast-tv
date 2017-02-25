@@ -132,13 +132,13 @@ class SamsungCastTv {
 		log.debug("isOn", isOn);
 		const promise = isOn ? this.samsungTv.powerOn() : this.samsungTv.powerOff();
 		return promise
-			.then(() => callback())
 			.catch(error => {
 				if (isOn) {
 					return Promise.resolve(this.chromecast.powerOn());
 				}
 				return Promise.reject(error);
 			})
+			.then(() => callback())
 			.catch(error => {
 				log.error(error);
 				callback(error);
