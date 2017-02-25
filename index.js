@@ -1,6 +1,7 @@
-var SamsungRemote = require('samsung-remote');
-var inherits = require('util').inherits;
-var Service, Characteristic, VolumeCharacteristic, ChannelCharacteristic, KeyCharacteristic;
+const Promise = require('bluebird');
+const SamsungRemote = require('samsung-remote');
+const inherits = require('util').inherits;
+const { Client, DefaultMediaReceiver } = require('castv2-client');
 
 /**
  * Just a little helper that guarantees that the callback function is only callable once.
@@ -9,42 +10,346 @@ var Service, Characteristic, VolumeCharacteristic, ChannelCharacteristic, KeyCha
  */
 function DisposableCallback(callback) {
 	var _callback = callback
-	return function() {
+	return function () {
 		_callback.apply(this, arguments)
-		_callback = function() {
+		_callback = function () {
 			console.log('Warning: Attempt to call disposable callback twice.')
 		}
 	}
 }
 
-module.exports = function(homebridge) {
-	Service = homebridge.hap.Service;
-	Characteristic = homebridge.hap.Characteristic;
-
-	// we can only do this after we receive the homebridge API object
-	makeVolumeCharacteristic();
-	makeChannelCharacteristic();
-	makeKeyCharacteristic();
-
-	homebridge.registerAccessory("homebridge-samsungtv", "SamsungTV", SamsungTvAccessory);
+module.exports = function (homebridge) {
+	homebridge.registerAccessory("homebridge-samsung-cast-tv", "SamsungCastTV", function (log, config, api) {
+		return new SamsungCastTv(homebridge, log, config, api);
+	});
 };
 
-//
-// SoundTouch Accessory
-//
+class SamsungCastTv {
+	constructor(homebridge, log, config, api) {
+		// Save args
+		this.log = log;
+		this.config = config;
+		this.api = api;
+		// Setup Homebridge
+		this.Service = homebridge.hap.Service;
+		this.Characteristic = homebridge.hap.Characteristic;
+		// Setup SamsungTV and Chromecast
+		const {
+			samsung: samsungConfig,
+			chromecast: chromecastConfig,
+		} = config;
+		this.samsungTv = new SamsungTv(samsungConfig, log);
+		this.chromecast = new Chromecast(chromecastConfig.ip, log);
+		this.chromecast.connect();
+
+		this.service = new this.Service.Switch(this.name);
+		this.setupCharacteristics();
+		this.tick();
+	}
+
+	get name() {
+		return this.config.name;
+	}
+
+	getInformationService() {
+		const { Service, Characteristic } = this;
+		var informationService = new Service.AccessoryInformation();
+		informationService
+			.setCharacteristic(Characteristic.Name, this.name)
+			.setCharacteristic(Characteristic.Manufacturer, 'Samsung TV')
+			.setCharacteristic(Characteristic.Model, '1.0.0')
+			.setCharacteristic(Characteristic.SerialNumber, this.ip_address);
+		return informationService;
+	}
+
+	getServices() {
+		return [this.service, this.getInformationService()];
+	}
+
+	setupCharacteristics() {
+		const { Characteristic } = this;
+		const power = this.service
+			.getCharacteristic(Characteristic.On)
+			.on('get', this.getPowerOn.bind(this))
+			.on('set', this.setPowerOn.bind(this))
+			;
+		// const mute = this.service
+		// 	.addCharacteristic(Characteristic.Mute)
+		// 	.on('get', this.getChromecastMute.bind(this))
+		// 	.on('set', this.setChromecastMute.bind(this))
+		// 	;
+		const volume = this.service
+			.addCharacteristic(Characteristic.Volume)
+			.on('get', this.getChromecastVolume.bind(this))
+			.on('set', this.setChromecastVolume.bind(this))
+			;
+
+		this.characteristics = {
+			power,
+			// mute,
+			volume,
+		};
+	}
+
+	tick() {
+		const { log } = this;
+		log.debug("Tick");
+		return this.updateValues()
+			.then(() => setTimeout(() => this.tick(), this.pollInterval))
+			.catch(() => setTimeout(() => this.tick(), this.pollInterval))
+			;
+	}
+
+	get pollInterval() {
+		return 2000;
+	}
+
+	updateValues() {
+		return Promise.all([
+			this.updateSamsungPower(),
+			this.updateChromecastVolume(),
+		]).timeout(this.pollInterval);
+	}
+
+	updateSamsungPower() {
+		return this.isSamsungActive
+			.then(isOn => this.characteristics.power.updateValue(isOn));
+	}
+
+	get isSamsungActive() {
+		return this.samsungTv.isActive;
+	}
+
+	getPowerOn(callback) {
+		return this.isSamsungActive
+			.then(isOn => callback(null, isOn))
+			.catch(error => callback(error))
+			;
+	}
+
+	setPowerOn(isOn, callback) {
+		const { log } = this;
+		log.debug("isOn", isOn);
+		const promise = isOn ? this.samsungTv.powerOn() : this.samsungTv.powerOff();
+		return promise
+			.then(() => callback())
+			.catch(error => {
+				if (isOn) {
+					return Promise.resolve(this.chromecast.powerOn());
+				}
+				return Promise.reject(error);
+			})
+			.catch(error => {
+				log.error(error);
+				callback(error);
+			})
+			;
+	}
+
+	updateChromecastVolume() {
+		return this.chromecastVolume
+			.then(volume => this.characteristics.volume.updateValue(volume));	
+	}
+
+	get chromecastVolume() {
+		return this.chromecast.volume;
+	}
+
+	getChromecastVolume(callback) {
+		return this.chromecast.volume
+			.then(volume => callback(null, volume))
+			.catch(error => callback(error))
+			;
+	}
+
+	setChromecastVolume(newVolume, callback) {
+		return this.chromecast.setVolume(newVolume)
+			.then(() => callback())
+			.catch(error => callback(error))
+			;
+	}
+
+}
+
+class SamsungTv {
+	constructor(customConfig, log) {
+		const config = Object.assign({}, {
+			timeout: 1000
+		}, customConfig);
+		this.remote = new SamsungRemote(config);
+		this.log = log;
+	}
+
+	get isActive() {
+		const { log } = this;
+		return new Promise((resolve, reject) => {
+			this.remote.isAlive(error => {
+				if (error) {
+					log.debug('TV is offline: %s', error);
+					resolve(false);
+				} else {
+					log.debug('TV is alive.');
+					resolve(true);
+				}
+			});
+		});
+	}
+
+	send(key) {
+		const { log } = this;
+		return new Promise((resolve, reject) => {
+			this.remote.send(key, err => {
+				if (err) {
+					log.debug('Could not turn TV on: %s', err);
+					reject(new Error(err));
+				} else {
+					log.debug('TV successfully turnen on');
+					resolve();
+				}
+			});
+		});
+	}
+
+	powerOn() {
+		return this.send('KEY_POWERON');
+	}
+
+	powerOff() {
+		return this.send('KEY_POWEROFF');
+	}
+
+	toggleMute() {
+		return this.send('KEY_MUTE');
+	}
+
+}
+
+class Chromecast {
+	constructor(host, log) {
+		this.host = host;
+		this.log = log;
+		this.client = new Client();
+		this.connected = false;
+		this.connecting = false;
+	}
+
+	connect() {
+		const { client, host, log } = this;
+		return new Promise((resolve, reject) => {
+			this.connecting = true;
+			client.connect(host, () => {
+				log.debug('connected, launching app ...', host);
+				this.connected = true;
+				this.connecting = false;
+				resolve();
+			});
+			client.on('error', function (error) {
+				log.debug('Error: %s', error.message);
+				client.close();
+				this.connected = false;
+				this.connecting = false;
+				reject(error);
+			});
+		});
+	}
+
+	powerOn() {
+		// const { client, log } = this;
+		// return new Promise((resolve, reject) =>
+		// 	client.getSessions((error, sessions) =>
+		// 		// log.debug("sessions", error, sessions)
+		// 	// client.getStatus((error, status) =>
+		// 	// 	log.debug("status", error, status)
+		// 		client.join(sessions[0], DefaultMediaReceiver, (error, player) => {
+		// 			if (error) {
+		// 				reject(error);
+		// 			} else {
+		// 				player.on('status', function (status) {
+		// 					log.debug('status broadcast playerState=%s', status.playerState);
+		// 				});
+		// 				log.debug('app "%s" launched, loading media %s ...', player.session.displayName);
+		// 				resolve();
+		// 			}
+		// 		})
+		// 	)
+		// );
+		this.launch();
+		return Promise.resolve();
+	}
+
+	launch(receiver = DefaultMediaReceiver) {
+		const { client, log } = this;
+		return new Promise((resolve, reject) => {
+			log.debug("Launching Chromecast");
+			client.launch(receiver, function (error, player) {
+				if (error) {
+					reject(error);
+				} else {
+					player.on('status', function (status) {
+						log.debug('status broadcast playerState=%s', status.playerState);
+					});
+					log.debug('app "%s" launched, loading media %s ...', player.session.displayName);
+					resolve();
+				}
+			});
+		});
+	}
+
+	get volume() {
+		const { client, log, connected } = this;
+		if (!connected) {
+			return Promise.reject(new Error("Not connected to Chromecast."));
+		}
+		return new Promise((resolve, reject) =>
+			client.getStatus((error, status) => {
+				const volume = status.volume.level * 100;
+				log.debug("Chromecast Volume", volume);
+				if (error) {
+					log.error(error)
+					return reject(error);
+				}
+				return resolve(volume);
+			})
+		);
+	}
+
+	setVolume(newVolume) {
+		const { client, log, connected } = this;
+		if (!connected) {
+			return Promise.reject(new Error("Not connected to Chromecast."));
+		}
+		return new Promise((resolve, reject) => {
+			try {
+				client.setVolume({ level: newVolume / 100 }, (error, currVolume) => {
+					const volume = currVolume * 100;
+					log.debug("Chromecast Volume", volume);
+					if (error) {
+						log.error(error)
+						return reject(error);
+					}
+					return resolve(volume);
+				});
+			} catch (error) {
+				log.error(error);
+				reject(error);
+			}
+		});		
+	}
+
+}
+
 
 function SamsungTvAccessory(log, config) {
 	this.log = log;
 	this.config = config;
 	this.name = config["name"];
-	this.ip_address = config["ip_address"];
+	const { samsung: samsungConfig } = config;
+	this.ip_address = samsungConfig["ip"];
 	this.send_delay = config["send_delay"] || 400;
 
 	if (!this.ip_address) throw new Error("You must provide a config value for 'ip_address'.");
 
-	this.remote = new SamsungRemote({
-		ip: this.ip_address // required: IP address of your Samsung Smart TV
-	});
+	this.remote = new SamsungRemote(samsungConfig);
 
 	this.isSendingSequence = false;
 
@@ -74,9 +379,14 @@ function SamsungTvAccessory(log, config) {
 		.addCharacteristic(KeyCharacteristic)
 		.on('get', this._getKey.bind(this))
 		.on('set', this._setKey.bind(this));
+
+	this.service
+		.addCharacteristic(Characteristic.Mute)
+		;
+
 }
 
-SamsungTvAccessory.prototype.getInformationService = function() {
+SamsungTvAccessory.prototype.getInformationService = function () {
 	var informationService = new Service.AccessoryInformation();
 	informationService
 		.setCharacteristic(Characteristic.Name, this.name)
@@ -86,14 +396,14 @@ SamsungTvAccessory.prototype.getInformationService = function() {
 	return informationService;
 };
 
-SamsungTvAccessory.prototype.getServices = function() {
+SamsungTvAccessory.prototype.getServices = function () {
 	return [this.service, this.getInformationService()];
 };
 
-SamsungTvAccessory.prototype._getOn = function(callback) {
+SamsungTvAccessory.prototype._getOn = function (callback) {
 	var accessory = this;
 	var cb = DisposableCallback(callback)
-	this.remote.isAlive(function(err) {
+	this.remote.isAlive(function (err) {
 		if (err) {
 			accessory.log.debug('TV is offline: %s', err);
 			cb(null, false);
@@ -104,11 +414,11 @@ SamsungTvAccessory.prototype._getOn = function(callback) {
 	});
 };
 
-SamsungTvAccessory.prototype._setOn = function(on, callback) {
+SamsungTvAccessory.prototype._setOn = function (on, callback) {
 	var accessory = this;
 	var cb = DisposableCallback(callback)
 	if (on) {
-		this.remote.send('KEY_POWERON', function(err) {
+		this.remote.send('KEY_POWERON', function (err) {
 			if (err) {
 				accessory.log.debug('Could not turn TV on: %s', err);
 				cb(new Error(err));
@@ -118,7 +428,7 @@ SamsungTvAccessory.prototype._setOn = function(on, callback) {
 			}
 		});
 	} else {
-		this.remote.send('KEY_POWEROFF', function(err) {
+		this.remote.send('KEY_POWEROFF', function (err) {
 			if (err) {
 				accessory.log.debug('Could not turn TV off: %s', err);
 				cb(new Error(err));
@@ -130,13 +440,13 @@ SamsungTvAccessory.prototype._setOn = function(on, callback) {
 	}
 };
 
-SamsungTvAccessory.prototype._getVolume = function(callback) {
+SamsungTvAccessory.prototype._getVolume = function (callback) {
 	var accessory = this;
 	var cb = DisposableCallback(callback)
 	cb(null, 25);
 };
 
-SamsungTvAccessory.prototype._setVolume = function(volume, callback) {
+SamsungTvAccessory.prototype._setVolume = function (volume, callback) {
 	var accessory = this;
 	var cb = DisposableCallback(callback)
 
@@ -150,7 +460,7 @@ SamsungTvAccessory.prototype._setVolume = function(volume, callback) {
 
 	// When volume is 0, mute will be toggled
 	if (volume === 0) {
-		accessory.remote.send('KEY_MUTE', function(err) {
+		accessory.remote.send('KEY_MUTE', function (err) {
 			if (err) {
 				accessory.isSendingSequence = false;
 				cb(new Error(err));
@@ -171,7 +481,7 @@ SamsungTvAccessory.prototype._setVolume = function(volume, callback) {
 
 	function sendKey(index) {
 		if (index > 0) {
-			accessory.remote.send(volumeKey, function(err) {
+			accessory.remote.send(volumeKey, function (err) {
 				if (err) {
 					accessory.isSendingSequence = false;
 					callback(new Error(err));
@@ -179,7 +489,7 @@ SamsungTvAccessory.prototype._setVolume = function(volume, callback) {
 					return;
 				}
 				// Send the next key after the specified delay
-				setTimeout(function() {
+				setTimeout(function () {
 					sendKey(--index)
 				}, accessory.send_delay);
 			});
@@ -193,14 +503,14 @@ SamsungTvAccessory.prototype._setVolume = function(volume, callback) {
 };
 
 
-SamsungTvAccessory.prototype._getChannel = function(callback) {
+SamsungTvAccessory.prototype._getChannel = function (callback) {
 	var accessory = this;
 	var cb = DisposableCallback(callback)
 
 	cb(null, accessory.channel);
 };
 
-SamsungTvAccessory.prototype._setChannel = function(channel, callback) {
+SamsungTvAccessory.prototype._setChannel = function (channel, callback) {
 	var accessory = this;
 	var cb = DisposableCallback(callback)
 
@@ -231,16 +541,16 @@ SamsungTvAccessory.prototype._setChannel = function(channel, callback) {
 	function sendKey(index) {
 		if (index < keys.length) {
 			accessory.log.debug('Sending channel key %s.', keys[index]);
-			accessory.remote.send(keys[index], function(err) {
+			accessory.remote.send(keys[index], function (err) {
 				if (err) {
 					accessory.isSendingSequence = false;
 					cb(new Error(err));
 					accessory.log.error('Could not send channel key %s: %s', keys[index], err);
 					return;
 				}
-				
+
 				// Send the next key after the specified delay
-				setTimeout(function() {
+				setTimeout(function () {
 					sendKey(++index)
 				}, accessory.send_delay);
 			});
@@ -254,14 +564,14 @@ SamsungTvAccessory.prototype._setChannel = function(channel, callback) {
 	sendKey(0)
 };
 
-SamsungTvAccessory.prototype._getKey = function(callback) {
+SamsungTvAccessory.prototype._getKey = function (callback) {
 	var accessory = this;
 	var cb = DisposableCallback(callback)
 
 	cb(null, accessory.key);
 };
 
-SamsungTvAccessory.prototype._setKey = function(key, callback) {
+SamsungTvAccessory.prototype._setKey = function (key, callback) {
 	var accessory = this;
 	var cb = DisposableCallback(callback)
 
@@ -274,7 +584,7 @@ SamsungTvAccessory.prototype._setKey = function(key, callback) {
 	this.isSendingSequence = true;
 	this.log.debug('Sending key %s.', key);
 
-	accessory.remote.send('KEY_' + key.toUpperCase(), function(err) {
+	accessory.remote.send('KEY_' + key.toUpperCase(), function (err) {
 		if (err) {
 			accessory.isSendingSequence = false;
 			cb(new Error(err));
@@ -295,7 +605,7 @@ SamsungTvAccessory.prototype._setKey = function(key, callback) {
  */
 function makeVolumeCharacteristic() {
 
-	VolumeCharacteristic = function() {
+	VolumeCharacteristic = function () {
 		Characteristic.call(this, 'Volume', '91288267-5678-49B2-8D22-F57BE995AA00');
 		this.setProps({
 			format: Characteristic.Formats.INT,
@@ -344,7 +654,7 @@ function makeChannelCharacteristic() {
  */
 function makeKeyCharacteristic() {
 
-	KeyCharacteristic = function() {
+	KeyCharacteristic = function () {
 		Characteristic.call(this, 'Key', '2A6FD4DE-8103-4E58-BDAC-25835CD006BD');
 		this.setProps({
 			format: Characteristic.Formats.STRING,

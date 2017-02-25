@@ -10,9 +10,19 @@
 
 	"accessories": [
 		{
-			"accessory": "SamsungTV",
-			"name": "TV living room",
-			"ip_address": "192.168.1.2"
+			"accessory": "SamsungCastTV",
+			"name": "TV",
+			"samsung": {
+				"ip": "192.168.1.22",
+				"host": {
+					"ip": "127.0.0.1",
+					"mac": "00:00:00:00",
+					"name": "Homebridge"
+				}
+			},
+			"chromecast": {
+				"ip": "192.168.1.12"
+			}
 		}
 	],
 
