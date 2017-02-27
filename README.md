@@ -1,27 +1,14 @@
-#Homebridge-samsungtv
+#Homebridge-samsung-cast-tv
 
 Samsung TV plugin for [Homebridge](https://github.com/nfarina/homebridge)
 
-This plugin allows you to control your Samsung TV (models until 2014) with HomeKit and Siri.
+This plugin allows you to control your Samsung TV (models until 2014) andd Chromecast with HomeKit and Siri.
+The Samsung TV will not power on over network, so the Chromecast is used to force the TV on!
 
 ## Installation
 1. Install homebridge using: `npm install -g homebridge`
 2. Install this plugin using: `npm install -g homebridge-samsungtv-control`
-3. Update your configuration file. See the sample below.
-
-## Configuration
-Example config.json:
-
-```js
-    "accessories": [
-		{
-			"accessory": "SamsungTV",
-			"name": "TV Living room",
-			"ip_address": "192.168.1.2",
-            "send_delay": 400
-		}
-	],
-```
+3. Update your configuration file. See the `config-sample.json`.
 
 ### Explanation:
 
