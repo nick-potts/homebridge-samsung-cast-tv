@@ -23,12 +23,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Glavin001/homebridge-samsung-cast-tv.git"
+    "url": "git+https://github.com/nick-potts/homebridge-samsung-cast-tv.git"
   },
   "bugs": {
-    "url": "https://github.com/Glavin001/homebridge-samsung-cast-tv/issues"
+    "url": "https://github.com/nick-potts/homebridge-samsung-cast-tv/issues"
   },
-  "homepage": "https://github.com/Glavin001/homebridge-samsung-cast-tv#readme",
+  "homepage": "https://github.com/nick-potts/homebridge-samsung-cast-tv#readme",
   "engines": {
     "node": ">=0.12.0",
     "homebridge": ">=0.2.0"

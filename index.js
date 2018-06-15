@@ -2,10 +2,33 @@ const Promise = require('bluebird');
 const SamsungRemote = require('samsung-remote');
 const { Client, DefaultMediaReceiver } = require('castv2-client');
 const { Accessory } = require('homebridge-plugin-helpers');
+var inherits = require('util').inherits;
+var KeyCharacteristic;
 
 module.exports = function (homebridge) {
 	SamsungCastTv.register(homebridge);
+	Characteristic = homebridge.hap.Characteristic;
+	makeKeyCharacteristic();
 };
+
+function makeKeyCharacteristic() {
+
+	KeyCharacteristic = function() {
+		Characteristic.call(this, 'Key', '2A6FD4DE-8103-4E58-BDAC-25835CD006BD');
+		this.setProps({
+			format: Characteristic.Formats.STRING,
+			unit: Characteristic.Units.NONE,
+			//maxValue: 10,
+			//minValue: -10,
+			//minStep: 1,
+			perms: [Characteristic.Perms.READ, Characteristic.Perms.WRITE, Characteristic.Perms.NOTIFY]
+		});
+		//this.value = this.getDefaultValue();
+		this.value = "TV";
+	};
+
+	inherits(KeyCharacteristic, Characteristic);
+}
 
 class SamsungCastTv extends Accessory {
 
@@ -63,11 +86,12 @@ class SamsungCastTv extends Accessory {
 			.on('get', this.getPowerOn.bind(this))
 			.on('set', this.setPowerOn.bind(this))
 			;
-		// const mute = this.service
-		// 	.addCharacteristic(Characteristic.Mute)
-		// 	.on('get', this.getChromecastMute.bind(this))
-		// 	.on('set', this.setChromecastMute.bind(this))
-		// 	;
+
+		const key = this.service
+			.addCharacteristic(KeyCharacteristic)
+			.on('get', this.getKey.bind(this))
+			.on('set', this.setKey.bind(this));
+
 		const volume = this.service
 			.addCharacteristic(Characteristic.Volume)
 			.on('get', this.getChromecastVolume.bind(this))
@@ -78,8 +102,10 @@ class SamsungCastTv extends Accessory {
 			power,
 			// mute,
 			volume,
+			key
 		};
 	}
+
 
 	tick() {
 		const { log } = this;
@@ -98,6 +124,7 @@ class SamsungCastTv extends Accessory {
 		return Promise.all([
 			this.updateSamsungPower(),
 			this.updateChromecastVolume(),
+			this.updateKey()
 		]).timeout(this.pollInterval);
 	}
 
@@ -115,6 +142,27 @@ class SamsungCastTv extends Accessory {
 			.then(isOn => callback(null, isOn))
 			.catch(error => callback(error))
 			;
+	}
+
+	updateKey() {
+		return null;
+	}
+
+	getKey(callback) {
+		callback(null);
+		return;
+	}
+
+	setKey(key, callback) {
+		const { log } = this;
+		log.debug("KEY_" + key.toUpperCase());
+
+		return this.samsungTv.send("KEY_" + key.toUpperCase())
+		.then(() => callback())
+		.catch((error) => {
+			log.error(error);
+			callback(error);
+		});
 	}
 
 	setPowerOn(isOn, callback) {
